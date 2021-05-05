@@ -1,0 +1,269 @@
+import logging
+import pickle
+import boto3
+import dill
+from botocore.exceptions import ClientError
+import pandas as pd
+from io import BytesIO, StringIO
+import codecs
+import csv
+
+
+class AwsS3BucketOps:
+    aws_access_key_id = 'ENTER YOUR KEY ID'
+    aws_secret_access_key = 'ENTER YOUR ACCESS KEY'
+    bucket_name = 'ENTER YOUR BUCKET NAME'
+
+    def __init__(self, key_id=None, access_key=None):
+
+        try:
+            if key_id and access_key is not None:
+                self.aws_access_key_id = key_id
+                self.aws_secret_access_key = access_key
+            else:
+                self.aws_access_key_id = AwsS3BucketOps.aws_access_key_id
+                self.aws_secret_access_key = AwsS3BucketOps.aws_secret_access_key
+
+            self.s3_client = boto3.client('s3', aws_access_key_id=self.aws_access_key_id,
+                                          aws_secret_access_key=self.aws_secret_access_key)
+
+            self.s3_resource = boto3.resource('s3', aws_access_key_id=self.aws_access_key_id,
+                                              aws_secret_access_key=self.aws_secret_access_key)
+        except Exception as e:
+            raise Exception("Error occurred in class: AwsS3BucketOps method:__init__ error: " + str(e))
+
+    def createBucket(self, region):
+
+        
+        try:
+            
+            self.s3_client.head_bucket(Bucket=self.bucket_name)
+            bucket_exist = 'Yes'
+        except ClientError:
+            bucket_exist = 'No'
+            print("The bucket does not exist or you have no access.")
+
+        if bucket_exist == 'No':
+            try:
+                location = {'LocationConstraint': region}
+
+                
+                self.s3_client.create_bucket(Bucket=bucket_name,
+                                             CreateBucketConfiguration=region)
+                print(f"\n{bucket_name} bucket has been created on AWS S3")
+            except ClientError as e:
+                print(e)
+                print(f"{bucket_name} cannot be created on s3")
+            else:
+                print(f"{bucket_name} cannot be created on s3")
+        return True
+
+    def createFolder(self, folder_name):
+
+        
+
+        self.s3_client.put_object(Bucket=self.bucket_name, Key=(folder_name + '/'))
+
+    def folderList(self):
+
+        object_listing = self.s3_client.list_objects_v2(Bucket=self.bucket_name)
+        
+
+        a = object_listing['Contents']
+        folderList = []
+        for i in range(len(a)):
+            d = a[i]
+            if d['Key'].endswith('/'):
+                folderList.append(d['Key'])
+        return folderList
+
+    def fileListInFolder(self, folder_name):
+
+        if not folder_name.endswith('/'):
+            folder_name = str(folder_name) + '/'
+
+        
+        object_listing = self.s3_client.list_objects_v2(Bucket=self.bucket_name, Prefix=folder_name)
+        
+        a = object_listing['Contents']
+        
+        fileList = []
+        for i in range(len(a)):
+            d = a[i]
+            if not d['Key'].endswith('/'):
+                fileList.append(d['Key'].split('/')[1])
+        return fileList
+
+    def upload_files(self, file_name, folder_name):
+        """Upload a file to an S3 bucket
+
+        :param folder_name:
+        :param bucket_name:
+        :param file_name: File to upload
+        :param bucket: Bucket to upload to
+        :param object_name: S3 object name. If not specified then file_name is used
+        :return: True if file was uploaded, else False
+        """
+
+        
+
+        if folder_name not in self.folderList():
+            self.createFolder(folder_name)
+        
+        try:
+            response = self.s3_client.upload_file(file_name, self.bucket_name, folder_name + '/{}'.format(file_name))
+        except ClientError as e:
+            logging.error(e)
+            return False
+        return True
+
+    def deleteFolder(self, folder_name):
+
+        folder_name = str(folder_name) + '/'
+
+        bucket = self.s3_resource.Bucket(self.bucket_name)
+        bucket.objects.filter(Prefix=folder_name).delete()
+        return True
+
+    def deleteFileFromFolder(self, file_name, folder_name):
+
+        print("Folder Name")
+        folder_name = str(folder_name) + '/'
+        print("f : ", folder_name)
+
+        self.s3_resource.Object(self.bucket_name, folder_name + file_name).delete()
+        return True
+
+    def readCsvFile(self, file_name, folder_name, drop_unnamed_col=True):
+
+        folder_name = str(folder_name) + '/'
+        object_key = folder_name + file_name
+
+        bucket = self.s3_resource.Bucket(self.bucket_name) 
+        
+        obj = bucket.Object(key=object_key) 
+
+        
+        response = obj.get()
+                
+        lines = response['Body']
+        print("Lines ", lines)
+        StringIO_read = StringIO(lines.read().decode())  # This only reads the String values in columns
+        
+        df = pd.read_csv(StringIO_read, encoding='utf-8')
+                
+        if drop_unnamed_col is False:
+            return df.copy()
+        elif "Unnamed: 0" in df.columns.to_list():
+            df.drop(columns=["Unnamed: 0"], axis=1, inplace=True)
+            return df.copy()
+        else:
+            return df.copy()
+
+    def saveObject(self, object_name, file_name, folder_name):
+
+        """
+
+        :param object_name:
+        :param file_name:
+        :param folder_name:
+        :param bucket_name:
+        :return: True if model file is saved successfully
+
+        This function first deletes the previous model file and then creates a new one
+
+        """
+
+        key = folder_name + '/' + file_name
+
+        if folder_name not in self.folderList():
+            self.createFolder(folder_name)
+        if file_name in self.fileListInFolder(folder_name):
+            self.deleteFileFromFolder(file_name, folder_name)
+
+        pickle_byte_obj = dill.dumps(object_name)
+
+        self.s3_resource.Object(self.bucket_name, key).put(Body=pickle_byte_obj)
+        return True
+
+    def loadObject(self, file_name, folder_name):
+
+        key = folder_name + '/' + file_name
+
+        response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
+
+        body = response['Body'].read()
+        model = pickle.loads(body)
+        return model
+
+    def copyFilesInDirectory(self, file_name, src_folder_name, desti_folder_name):
+
+        try:
+
+            if not src_folder_name.endswith('/'):
+                src_folder_name = src_folder_name + '/'            
+            srcKey = src_folder_name + file_name
+            copy_source = {'Bucket': self.bucket_name, 'Key': srcKey}
+            
+            des_folder_file = desti_folder_name + '/' + file_name
+          
+            self.s3_resource.meta.client.copy(copy_source, self.bucket_name, des_folder_file)
+
+        except Exception as e:
+
+            msg = "Error occured while copying the  FileName " + str(e)
+            print(msg)
+            
+            raise e
+
+        return True
+
+    def moveFilesInDirectory(self, file_name, src_folder_name, destination_folder_name):
+
+        self.copyFilesInDirectory(file_name, src_folder_name, destination_folder_name)
+        print("Copied")
+        self.deleteFileFromFolder(file_name, src_folder_name)
+        print("deleted")
+        return True
+
+    def saveDataFrameTocsv(self, folder_name, file_name, data_frame, **kwargs):
+
+
+        try:
+            dir_list = aws.folderList()
+            # self.dir_list = [container_name.name for container_name in self.blob_service_client.list_containers()]
+            allowed_keys = ['index', 'header', 'mode']
+            self.__dict__.update((k, v) for k, v in kwargs.items() if k in allowed_keys)
+
+            # directory_name = directory_name.lower()
+            if file_name.split(".")[-1] != "csv":
+                file_name = file_name + ".csv"
+            if folder_name not in dir_list:
+                aws.createFolder(folder_name)
+            if file_name in self.fileListInFolder(folder_name) and 'mode' in self.__dict__.keys():
+                if self.mode == 'a+':
+                    df = self.readCsvFile(file_name=file_name, folder_name=folder_name)
+                    data_frame = df.append(data_frame)
+                    if 'Unnamed: 0' in data_frame.columns:
+                        data_frame = data_frame.drop(columns=['Unnamed: 0'], axis=1)
+
+            if file_name in self.fileListInFolder(folder_name):
+                self.deleteFileFromFolder(file_name, folder_name)
+
+            
+            if "index" in self.__dict__.keys() and "header" in self.__dict__.keys():
+                
+                output = data_frame.to_csv( index=self.index, header=self.header)
+            elif "header" in self.__dict__.keys() and 'mode' in self.__dict__.keys():
+                
+                output = data_frame.to_csv(header=self.header)
+            else:
+                
+                output = data_frame.to_csv()
+
+            key = folder_name + '/' + file_name
+            
+            self.s3_resource.Object(self.bucket_name, key).put(Body=output)
+            return True
+        except Exception as e:
+            raise Exception("Error occurred in class: AWS_s3 method:saveDataFrameTocsv error:" + str(e))
